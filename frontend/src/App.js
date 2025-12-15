@@ -4,6 +4,8 @@ import { getAppEnv } from './utils/env';
 import './App.css';
 import TestCasesPage from './pages/TestCases';
 import { ToastProvider } from './components/Toaster';
+import { useToasts } from './components/Toaster';
+import { listAllTestCases, triggerTestRun, getTestRun, getTestRunLogs, cancelTestRun } from './api/testRuns';
 
 /**
  * Simple hash-based router without external dependencies.
@@ -328,75 +330,340 @@ function TestAuthoringPage() {
 
 // PUBLIC_INTERFACE
 function TestRunsPage() {
-  /** Launch and monitor test runs. */
-  const [selectedIds, setSelectedIds] = useState(() => {
-    try {
-      const raw = window.localStorage.getItem('cn.selected.tests.v1');
-      const arr = JSON.parse(raw || '[]');
-      return Array.isArray(arr) ? arr : [];
-    } catch { return []; }
-  });
+  /**
+   * Launch and monitor test runs.
+   * - Lists available test cases (via GET /api/tests) for selection
+   * - Triggers a run via POST /api/test-runs
+   * - Polls status via GET /api/test-runs/{id}
+   * - Polls logs via GET /api/test-runs/{id}/logs
+   * - Cancel/refresh controls and graceful error handling
+   */
+  const toasts = useToasts();
 
+  const [testsLoading, setTestsLoading] = useState(true);
+  const [testsError, setTestsError] = useState(null);
+  const [tests, setTests] = useState([]);
+
+  const [selectedTestId, setSelectedTestId] = useState('');
+  const [suite, setSuite] = useState('Smoke');
+  const [environment, setEnvironment] = useState('Staging');
+
+  const [runId, setRunId] = useState(null);
+  const [runStatus, setRunStatus] = useState(null);
+  const [runError, setRunError] = useState(null);
+
+  const [logs, setLogs] = useState([]);
+  const [isRunning, setIsRunning] = useState(false);
+  const [isCancelling, setIsCancelling] = useState(false);
+  const [lastRefreshedAt, setLastRefreshedAt] = useState(null);
+
+  // Load available test cases
   useEffect(() => {
-    // Listen to storage changes from TestCases page in other tabs
-    const onStorage = (e) => {
-      if (e.key === 'cn.selected.tests.v1') {
-        try {
-          const arr = JSON.parse(e.newValue || '[]');
-          setSelectedIds(Array.isArray(arr) ? arr : []);
-        } catch { /* ignore */ }
+    let aborted = false;
+    const controller = new AbortController();
+    async function load() {
+      setTestsLoading(true);
+      setTestsError(null);
+      try {
+        const res = await listAllTestCases({ signal: controller.signal });
+        if (aborted) return;
+        // normalize shape
+        const arr = Array.isArray(res) ? res : [];
+        setTests(arr);
+        // auto-pick first if none selected
+        if (!selectedTestId && arr.length > 0) {
+          const firstId = arr[0].id ?? arr[0]._id ?? arr[0].uuid ?? arr[0].name;
+          if (firstId) setSelectedTestId(String(firstId));
+        }
+      } catch (e) {
+        if (aborted) return;
+        setTestsError(e);
+      } finally {
+        if (!aborted) setTestsLoading(false);
+      }
+    }
+    load();
+    return () => {
+      aborted = true;
+      try { controller.abort(); } catch { /* ignore */ }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Polling intervals
+  useEffect(() => {
+    if (!runId) return;
+    let statusTimer = null;
+    let logsTimer = null;
+    let disposed = false;
+
+    const fetchStatus = async () => {
+      try {
+        const data = await getTestRun(runId);
+        if (disposed) return;
+        const status = data?.status || data?.state || 'unknown';
+        setRunStatus(status);
+        setLastRefreshedAt(Date.now());
+        // Stop polling if terminal state
+        const low = String(status).toLowerCase();
+        if (['completed', 'failed', 'cancelled', 'canceled', 'passed', 'error'].includes(low)) {
+          setIsRunning(false);
+          // clear timers
+          if (statusTimer) clearInterval(statusTimer);
+          if (logsTimer) clearInterval(logsTimer);
+        }
+      } catch (e) {
+        if (disposed) return;
+        setRunError(e);
       }
     };
-    window.addEventListener('storage', onStorage);
-    return () => window.removeEventListener('storage', onStorage);
-  }, []);
+
+    const fetchLogs = async () => {
+      try {
+        const data = await getTestRunLogs(runId);
+        if (disposed) return;
+        // Accept either array of strings or string (possibly newline-delimited)
+        let lines = [];
+        if (Array.isArray(data)) {
+          lines = data.map((x) => String(x));
+        } else if (typeof data === 'string') {
+          lines = data.split(/\r?\n/);
+        } else if (data && typeof data === 'object' && Array.isArray(data.items)) {
+          lines = data.items.map((x) => String(x));
+        }
+        setLogs(lines);
+      } catch (e) {
+        if (disposed) return;
+        // Non-fatal: show a hint only once
+        setRunError((prev) => prev || e);
+      }
+    };
+
+    // initial fetch
+    fetchStatus();
+    fetchLogs();
+
+    // intervals
+    statusTimer = setInterval(fetchStatus, 2000);
+    logsTimer = setInterval(fetchLogs, 1500);
+
+    return () => {
+      disposed = true;
+      if (statusTimer) clearInterval(statusTimer);
+      if (logsTimer) clearInterval(logsTimer);
+    };
+  }, [runId]);
+
+  const handleTriggerRun = async () => {
+    if (!selectedTestId) {
+      toasts.error('Please select a test case to run.');
+      return;
+    }
+    setRunError(null);
+    setIsRunning(true);
+    setRunId(null);
+    setRunStatus('starting');
+    setLogs([]);
+
+    try {
+      // The milestone specifies POST /api/test-runs with a test_case_id
+      const res = await triggerTestRun({
+        testCaseId: selectedTestId,
+        metadata: { suite, environment },
+      });
+      const id = res?.id ?? res?.run_id ?? res?.uuid;
+      if (!id) {
+        throw new Error('Backend did not return a run id');
+      }
+      setRunId(String(id));
+      setRunStatus(res?.status || 'queued');
+      toasts.info(`Run ${id} started`, 'Run started');
+    } catch (e) {
+      setIsRunning(false);
+      setRunStatus(null);
+      setRunId(null);
+      setRunError(e);
+      const status = e?.status;
+      if (!status || (status >= 500 || status === 404)) {
+        toasts.error('Backend not ready for test runs yet. Please try again later.');
+      } else {
+        toasts.error(e?.message || 'Failed to start run');
+      }
+    }
+  };
+
+  const handleCancel = async () => {
+    if (!runId) return;
+    setIsCancelling(true);
+    try {
+      await cancelTestRun(runId);
+      toasts.info(`Cancel requested for run ${runId}`);
+      // We rely on poller to update status to cancelled
+    } catch (e) {
+      // Some backends may not have cancel; show gentle message
+      toasts.error(e?.message || 'Cancel not supported or failed');
+    } finally {
+      setIsCancelling(false);
+    }
+  };
+
+  const handleRefresh = async () => {
+    if (!runId) {
+      // Refresh test list if no run
+      setTestsLoading(true);
+      setTestsError(null);
+      try {
+        const res = await listAllTestCases();
+        const arr = Array.isArray(res) ? res : [];
+        setTests(arr);
+      } catch (e) {
+        setTestsError(e);
+      } finally {
+        setTestsLoading(false);
+      }
+      return;
+    }
+    try {
+      const data = await getTestRun(runId);
+      const status = data?.status || data?.state || runStatus;
+      setRunStatus(status);
+      setLastRefreshedAt(Date.now());
+      const logData = await getTestRunLogs(runId);
+      let lines = [];
+      if (Array.isArray(logData)) {
+        lines = logData.map((x) => String(x));
+      } else if (typeof logData === 'string') {
+        lines = logData.split(/\r?\n/);
+      } else if (logData && typeof logData === 'object' && Array.isArray(logData.items)) {
+        lines = logData.items.map((x) => String(x));
+      }
+      setLogs(lines);
+    } catch (e) {
+      setRunError(e);
+    }
+  };
+
+  const statusBadge = (status) => {
+    if (!status) return <span className="cn-badge info">-</span>;
+    const s = String(status).toLowerCase();
+    if (['passed', 'success', 'completed'].includes(s)) return <span className="cn-badge ok">{status}</span>;
+    if (['failed', 'error', 'cancelled', 'canceled'].includes(s)) return <span className="cn-badge error">{status}</span>;
+    return <span className="cn-badge info">{status}</span>;
+  };
+
+  const renderLauncher = (
+    <div className="cn-form">
+      <label className="cn-field">
+        <span>Test Case</span>
+        {testsLoading && <div className="cn-muted">Loading test cases...</div>}
+        {testsError && (
+          <div className="cn-muted" style={{ color: 'var(--cn-error, #DC2626)' }}>
+            {testsError?.message || 'Failed to load test cases. The backend may not be ready.'}
+          </div>
+        )}
+        {!testsLoading && !testsError && (
+          <select
+            value={selectedTestId}
+            onChange={(e) => setSelectedTestId(e.target.value)}
+            aria-label="Select test case"
+          >
+            {tests.length === 0 && <option value="">No test cases available</option>}
+            {tests.map((t) => {
+              const id = t.id ?? t._id ?? t.uuid ?? t.name;
+              return (
+                <option key={String(id)} value={String(id)}>
+                  {t.name || id}
+                </option>
+              );
+            })}
+          </select>
+        )}
+      </label>
+      <label className="cn-field">
+        <span>Suite</span>
+        <select value={suite} onChange={(e) => setSuite(e.target.value)}>
+          <option>Smoke</option>
+          <option>Regression</option>
+          <option>Full</option>
+        </select>
+      </label>
+      <label className="cn-field">
+        <span>Environment</span>
+        <select value={environment} onChange={(e) => setEnvironment(e.target.value)}>
+          <option>Staging</option>
+          <option>Production</option>
+        </select>
+      </label>
+      <div className="cn-actions">
+        <button className="cn-btn primary" onClick={handleTriggerRun} disabled={!selectedTestId || testsLoading || isRunning}>
+          {isRunning && !runId ? 'Starting...' : 'Run'}
+        </button>
+        <button className="cn-btn ghost" onClick={handleRefresh}>Refresh</button>
+      </div>
+      {(!testsLoading && tests.length === 0) && (
+        <small className="cn-muted" style={{ marginTop: 8 }}>
+          No tests to run. Create tests in the Test Cases page.
+        </small>
+      )}
+    </div>
+  );
+
+  const renderMonitor = (
+    <div className="cn-grid">
+      <div className="cn-card">
+        <h3>Run</h3>
+        <div className="cn-list" style={{ listStyle: 'none', paddingLeft: 0 }}>
+          <div><strong>ID:</strong> {runId || '-'}</div>
+          <div><strong>Status:</strong> {statusBadge(runStatus)}</div>
+          {lastRefreshedAt && (
+            <div className="cn-muted"><small>Last updated: {new Date(lastRefreshedAt).toLocaleTimeString()}</small></div>
+          )}
+        </div>
+        <div className="cn-actions" style={{ marginTop: 10 }}>
+          <button className="cn-btn" onClick={handleRefresh} disabled={!runId}>Refresh</button>
+          <button className="cn-btn ghost" onClick={handleCancel} disabled={!runId || isCancelling}>
+            {isCancelling ? 'Cancelling...' : 'Cancel'}
+          </button>
+        </div>
+        {runError && (
+          <div className="cn-muted" style={{ marginTop: 8, color: 'var(--cn-error, #DC2626)' }}>
+            {runError?.message || 'Error occurred. The backend endpoints may not be available yet.'}
+          </div>
+        )}
+      </div>
+      <div className="cn-card wide">
+        <h3>Logs</h3>
+        <div
+          style={{
+            border: '1px solid var(--border-color)',
+            borderRadius: 8,
+            padding: 10,
+            background: 'var(--bg-secondary)',
+            height: 260,
+            overflow: 'auto',
+            whiteSpace: 'pre-wrap',
+            fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono","Courier New", monospace',
+            fontSize: 12,
+          }}
+          aria-live="polite"
+        >
+          {logs.length === 0 ? (
+            <div className="cn-muted">No logs yet.</div>
+          ) : (
+            logs.map((line, idx) => <div key={idx}>{line}</div>)
+          )}
+        </div>
+      </div>
+    </div>
+  );
 
   return (
     <>
-      <Section title="Start a Run" description="Select tests and environment to execute.">
-        <div className="cn-form">
-          <div className="cn-field">
-            <span>Selected Tests</span>
-            <div className="cn-muted">
-              {selectedIds.length} selected. Manage selection in Test Cases.
-            </div>
-          </div>
-          <label className="cn-field">
-            <span>Suite</span>
-            <select>
-              <option>Smoke</option>
-              <option>Regression</option>
-              <option>Full</option>
-            </select>
-          </label>
-          <label className="cn-field">
-            <span>Environment</span>
-            <select>
-              <option>Staging</option>
-              <option>Production</option>
-            </select>
-          </label>
-          <div className="cn-actions">
-            <button className="cn-btn primary" disabled={selectedIds.length === 0}>Run</button>
-            <button className="cn-btn ghost">Schedule</button>
-          </div>
-        </div>
+      <Section title="Start a Run" description="Choose a test case and environment, then trigger a run.">
+        {renderLauncher}
       </Section>
-      <Section title="Recent Runs" description="Latest runs and statuses.">
-        <div className="cn-table">
-          <div className="cn-table-row cn-table-head">
-            <div>ID</div><div>Suite</div><div>Env</div><div>Status</div>
-          </div>
-          <div className="cn-table-row">
-            <div>#284</div><div>Smoke</div><div>Staging</div><div><span className="cn-badge info">Running</span></div>
-          </div>
-          <div className="cn-table-row">
-            <div>#283</div><div>Regression</div><div>Staging</div><div><span className="cn-badge ok">Passed</span></div>
-          </div>
-          <div className="cn-table-row">
-            <div>#282</div><div>Full</div><div>Prod</div><div><span className="cn-badge error">Failed</span></div>
-          </div>
-        </div>
+      <Section title="Monitor" description="Track status and view incremental logs.">
+        {renderMonitor}
       </Section>
     </>
   );
