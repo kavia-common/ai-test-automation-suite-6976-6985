@@ -17,25 +17,16 @@ function normalizeSteps(val) {
   if (typeof val === 'string') {
     return val
       .split(/\r?\n/)
-      .map((s) => s.trim())
+      .map((s) => s.replace(/^\s*[\u2022*-]\s*/, '').trim())
       .filter(Boolean);
   }
   return [];
 }
 
 function joinSteps(steps) {
-  return (Array.isArray(steps) ? steps : []).map((s, i) => `• ${String(s)}`).join('\n');
+  return (Array.isArray(steps) ? steps : []).map((s) => `• ${String(s)}`).join('\n');
 }
 
-/**
- * AI Authoring Page:
- * - Hidden if experiments feature flag is off
- * - Inputs: Test Name, Prompt, (optional) Context/Constraints
- * - Calls backend AI authoring endpoint via aiGenerateTest()
- * - Renders rationale and suggested steps; user can edit steps and rationale
- * - Save as new test or update an existing test case (select from list)
- * - Loading/error states and toasts on success/failure
- */
 // PUBLIC_INTERFACE
 export default function TestAuthoring() {
   /** AI-assisted authoring experience for test cases. */
@@ -48,7 +39,7 @@ export default function TestAuthoring() {
   const [prompt, setPrompt] = useState('');
   const [context, setContext] = useState('');
   const [constraints, setConstraints] = useState('');
-  const [tags, setTags] = useState(''); // comma separated
+  const [tags, setTags] = useState('');
 
   // Generate state
   const [generating, setGenerating] = useState(false);
@@ -56,7 +47,7 @@ export default function TestAuthoring() {
 
   // Output from AI (editable)
   const [rationale, setRationale] = useState('');
-  const [stepsText, setStepsText] = useState(''); // plaintext list (one per line / bullets)
+  const [stepsText, setStepsText] = useState('');
 
   // Test case update flow
   const [existingLoading, setExistingLoading] = useState(false);
@@ -117,8 +108,7 @@ export default function TestAuthoring() {
     setGenerating(true);
     setGenError(null);
     try {
-      // Payload shape: match backend /api/ai/author expectations
-      // We'll send: { prompt, context?, constraints?, name? }
+      // Send to AI author endpoint via client wrapper.
       const payload = {
         name: name.trim(),
         prompt: prompt.trim(),
@@ -126,13 +116,18 @@ export default function TestAuthoring() {
         ...(constraints.trim() ? { constraints: constraints.trim() } : {}),
       };
       const res = await aiGenerateTest(payload);
-      // Expected response: { suggested_steps: string[] or single string, rationale?: string, ... }
-      const outSteps = normalizeSteps(res?.suggested_steps || res?.steps || res?.result?.steps || []);
+      // Read suggested steps and rationale regardless of response shape.
+      const outSteps = normalizeSteps(
+        res?.suggested_steps ??
+        res?.steps ??
+        res?.result?.steps ??
+        (Array.isArray(res) ? res : [])
+      );
       const outRationale =
         res?.rationale ||
         res?.reasoning ||
         res?.result?.rationale ||
-        (res?.explanations?.length ? res.explanations.join('\n') : '');
+        (Array.isArray(res?.explanations) ? res.explanations.join('\n') : '');
 
       setStepsText(joinSteps(outSteps.length ? outSteps : ['Open the app', 'Perform main action', 'Assert expected result']));
       setRationale(outRationale || 'Draft rationale from AI. Review and refine as needed.');
@@ -151,6 +146,12 @@ export default function TestAuthoring() {
     }
   };
 
+  const navigateToTestCases = () => {
+    try {
+      window.location.hash = '#/test-cases';
+    } catch { /* ignore */ }
+  };
+
   const handleSave = async () => {
     const nmErr = validateName(name);
     setNameError(nmErr);
@@ -158,10 +159,7 @@ export default function TestAuthoring() {
       toasts.error('Please provide a valid Test Name.');
       return;
     }
-    const steps = normalizeSteps(
-      stepsText
-        .replace(/^\s*[\u2022*-]\s*/gm, '') // remove bullet markers
-    );
+    const steps = normalizeSteps(stepsText);
     if (steps.length === 0) {
       toasts.error('Please include at least one test step.');
       return;
@@ -188,6 +186,8 @@ export default function TestAuthoring() {
         const created = await createTestCase(payload);
         toasts.success(`Created new test case "${created?.name || name}".`);
       }
+      // Navigate back to Test Cases after a short delay to show toast
+      setTimeout(navigateToTestCases, 350);
     } catch (e) {
       toasts.error(e?.message || 'Failed to save test case');
     } finally {
@@ -330,7 +330,7 @@ export default function TestAuthoring() {
       <section className="cn-section">
         <div className="cn-section-header">
           <h2>Save</h2>
-          <p className="cn-muted">Save as a new test case or update an existing one.</p>
+          <p className="cn-muted">Save as a new test case or update an existing one. You will be taken back to Test Cases after saving.</p>
         </div>
         <div className="cn-section-body">
           <div className="cn-card">
@@ -386,6 +386,9 @@ export default function TestAuthoring() {
               <div className="cn-actions">
                 <button className="cn-btn primary" onClick={handleSave} disabled={saving}>
                   {saving ? 'Saving…' : (targetMode === 'update' ? 'Update Test Case' : 'Create Test Case')}
+                </button>
+                <button className="cn-btn ghost" onClick={navigateToTestCases} disabled={saving}>
+                  Back to Test Cases
                 </button>
               </div>
             </div>
