@@ -1,11 +1,12 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { getHealth } from './api/client';
-import { getAppEnv } from './utils/env';
+import { getAppEnv, getFeatureFlag } from './utils/env';
 import './App.css';
 import TestCasesPage from './pages/TestCases';
 import { ToastProvider } from './components/Toaster';
 import { useToasts } from './components/Toaster';
 import { listAllTestCases, triggerTestRun, getTestRun, getTestRunLogs, cancelTestRun } from './api/testRuns';
+import { connectRunEvents } from './api/ws';
 
 /**
  * Simple hash-based router without external dependencies.
@@ -332,11 +333,13 @@ function TestAuthoringPage() {
 function TestRunsPage() {
   /**
    * Launch and monitor test runs.
-   * - Lists available test cases (via GET /api/tests) for selection
-   * - Triggers a run via POST /api/test-runs
-   * - Polls status via GET /api/test-runs/{id}
-   * - Polls logs via GET /api/test-runs/{id}/logs
-   * - Cancel/refresh controls and graceful error handling
+   * Behavior:
+   * - Lists test cases for selection
+   * - Triggers runs via REST
+   * - If feature flag WS is enabled and wsUrl present, subscribe to WebSocket events:
+   *    run_started, log, run_updated, run_completed (generic 'message' also handled)
+   * - Maintain REST polling as fallback when WS is disabled or unavailable
+   * - Display connection status indicator and clean up subscriptions on unmount
    */
   const toasts = useToasts();
 
@@ -357,6 +360,13 @@ function TestRunsPage() {
   const [isCancelling, setIsCancelling] = useState(false);
   const [lastRefreshedAt, setLastRefreshedAt] = useState(null);
 
+  // WS state
+  const env = getAppEnv();
+  const wsFeatureOn = getFeatureFlag('WS', false);
+  const wsEnabled = wsFeatureOn && !!env.wsUrl;
+  const [wsConnected, setWsConnected] = useState(false);
+  const [wsError, setWsError] = useState(null);
+
   // Load available test cases
   useEffect(() => {
     let aborted = false;
@@ -367,10 +377,8 @@ function TestRunsPage() {
       try {
         const res = await listAllTestCases({ signal: controller.signal });
         if (aborted) return;
-        // normalize shape
         const arr = Array.isArray(res) ? res : [];
         setTests(arr);
-        // auto-pick first if none selected
         if (!selectedTestId && arr.length > 0) {
           const firstId = arr[0].id ?? arr[0]._id ?? arr[0].uuid ?? arr[0].name;
           if (firstId) setSelectedTestId(String(firstId));
@@ -390,7 +398,7 @@ function TestRunsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Polling intervals
+  // REST polling fallback
   useEffect(() => {
     if (!runId) return;
     let statusTimer = null;
@@ -404,11 +412,9 @@ function TestRunsPage() {
         const status = data?.status || data?.state || 'unknown';
         setRunStatus(status);
         setLastRefreshedAt(Date.now());
-        // Stop polling if terminal state
         const low = String(status).toLowerCase();
         if (['completed', 'failed', 'cancelled', 'canceled', 'passed', 'error'].includes(low)) {
           setIsRunning(false);
-          // clear timers
           if (statusTimer) clearInterval(statusTimer);
           if (logsTimer) clearInterval(logsTimer);
         }
@@ -422,7 +428,6 @@ function TestRunsPage() {
       try {
         const data = await getTestRunLogs(runId);
         if (disposed) return;
-        // Accept either array of strings or string (possibly newline-delimited)
         let lines = [];
         if (Array.isArray(data)) {
           lines = data.map((x) => String(x));
@@ -434,25 +439,117 @@ function TestRunsPage() {
         setLogs(lines);
       } catch (e) {
         if (disposed) return;
-        // Non-fatal: show a hint only once
         setRunError((prev) => prev || e);
       }
     };
 
-    // initial fetch
+    // Start polling
     fetchStatus();
     fetchLogs();
-
-    // intervals
     statusTimer = setInterval(fetchStatus, 2000);
     logsTimer = setInterval(fetchLogs, 1500);
+
+    // If WS becomes connected, stop logs polling to avoid duplicates
+    const maybeStopLogsPolling = () => {
+      if (wsEnabled && wsConnected && logsTimer) {
+        clearInterval(logsTimer);
+        logsTimer = null;
+      }
+    };
+    maybeStopLogsPolling();
 
     return () => {
       disposed = true;
       if (statusTimer) clearInterval(statusTimer);
       if (logsTimer) clearInterval(logsTimer);
     };
-  }, [runId]);
+  }, [runId, wsEnabled, wsConnected]);
+
+  // WebSocket subscription wiring
+  useEffect(() => {
+    if (!wsEnabled) {
+      setWsConnected(false);
+      setWsError(null);
+      return;
+    }
+    const client = connectRunEvents();
+    const offOpen = client.subscribe('open', () => {
+      setWsConnected(true);
+      setWsError(null);
+    });
+    const offClose = client.subscribe('close', () => {
+      setWsConnected(false);
+    });
+    const offErr = client.subscribe('error', (e) => {
+      setWsError(e);
+      setWsConnected(false);
+    });
+
+    // Event handlers
+    const onRunStarted = (msg) => {
+      if (msg?.run_id) {
+        const id = String(msg.run_id);
+        setRunId((prev) => prev || id);
+        setRunStatus('running');
+        setIsRunning(true);
+      }
+    };
+    const onRunUpdated = (msg) => {
+      if (!msg?.run_id) return;
+      const id = String(msg.run_id);
+      if (runId && String(runId) !== id) return;
+      if (!runId) setRunId(id);
+      const status = msg?.status || msg?.state;
+      if (status) {
+        setRunStatus(status);
+        setLastRefreshedAt(Date.now());
+      }
+    };
+    const onRunCompleted = (msg) => {
+      if (!msg?.run_id) return;
+      const id = String(msg.run_id);
+      if (runId && String(runId) !== id) return;
+      const status = msg?.status || 'completed';
+      setRunStatus(status);
+      setIsRunning(false);
+      setLastRefreshedAt(Date.now());
+    };
+    const onLog = (msg) => {
+      if (msg?.run_id && runId && String(runId) !== String(msg.run_id)) return;
+      if (typeof msg?.message === 'string') {
+        setLogs((prev) => [...prev, msg.message]);
+      } else if (Array.isArray(msg?.lines)) {
+        const lines = msg.lines.map((x) => String(x));
+        setLogs((prev) => [...prev, ...lines]);
+      }
+    };
+    const onMessage = (payload) => {
+      if (!payload || typeof payload !== 'object') return;
+      if (payload.type === 'run_started') onRunStarted(payload);
+      else if (payload.type === 'run_updated') onRunUpdated(payload);
+      else if (payload.type === 'run_completed') onRunCompleted(payload);
+      else if (payload.type === 'log') onLog(payload);
+    };
+
+    const offStarted = client.subscribe('run_started', onRunStarted);
+    const offUpdated = client.subscribe('run_updated', onRunUpdated);
+    const offCompleted = client.subscribe('run_completed', onRunCompleted);
+    const offLog = client.subscribe('log', onLog);
+    const offMsg = client.subscribe('message', onMessage);
+
+    return () => {
+      offOpen?.();
+      offClose?.();
+      offErr?.();
+      offStarted?.();
+      offUpdated?.();
+      offCompleted?.();
+      offLog?.();
+      offMsg?.();
+      client.close?.();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wsEnabled, runId]);
 
   const handleTriggerRun = async () => {
     if (!selectedTestId) {
@@ -466,7 +563,6 @@ function TestRunsPage() {
     setLogs([]);
 
     try {
-      // The milestone specifies POST /api/test-runs with a test_case_id
       const res = await triggerTestRun({
         testCaseId: selectedTestId,
         metadata: { suite, environment },
@@ -498,9 +594,7 @@ function TestRunsPage() {
     try {
       await cancelTestRun(runId);
       toasts.info(`Cancel requested for run ${runId}`);
-      // We rely on poller to update status to cancelled
     } catch (e) {
-      // Some backends may not have cancel; show gentle message
       toasts.error(e?.message || 'Cancel not supported or failed');
     } finally {
       setIsCancelling(false);
@@ -509,7 +603,6 @@ function TestRunsPage() {
 
   const handleRefresh = async () => {
     if (!runId) {
-      // Refresh test list if no run
       setTestsLoading(true);
       setTestsError(null);
       try {
@@ -549,6 +642,21 @@ function TestRunsPage() {
     if (['passed', 'success', 'completed'].includes(s)) return <span className="cn-badge ok">{status}</span>;
     if (['failed', 'error', 'cancelled', 'canceled'].includes(s)) return <span className="cn-badge error">{status}</span>;
     return <span className="cn-badge info">{status}</span>;
+  };
+
+  const ConnectionIndicator = () => {
+    if (!wsFeatureOn) {
+      return <span className="cn-badge warn" title="WebSocket feature disabled via flags">WS off</span>;
+    }
+    if (!env.wsUrl) {
+      return <span className="cn-badge warn" title="REACT_APP_WS_URL not set and cannot be derived">WS unavailable</span>;
+    }
+    if (wsError) {
+      return <span className="cn-badge error" title="WebSocket error occurred">WS error</span>;
+    }
+    return wsConnected
+      ? <span className="cn-badge ok" title={`Connected to ${env.wsUrl}`}>WS live</span>
+      : <span className="cn-badge info" title="Attempting to connect">WS connecting</span>;
   };
 
   const renderLauncher = (
@@ -599,6 +707,7 @@ function TestRunsPage() {
           {isRunning && !runId ? 'Starting...' : 'Run'}
         </button>
         <button className="cn-btn ghost" onClick={handleRefresh}>Refresh</button>
+        <span style={{ marginLeft: 'auto' }}><ConnectionIndicator /></span>
       </div>
       {(!testsLoading && tests.length === 0) && (
         <small className="cn-muted" style={{ marginTop: 8 }}>
