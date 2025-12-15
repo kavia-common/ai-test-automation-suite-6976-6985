@@ -3,6 +3,7 @@ import { getHealth } from './api/client';
 import { getAppEnv, getFeatureFlag } from './utils/env';
 import './App.css';
 import TestCasesPage from './pages/TestCases';
+import TestAuthoringPage from './pages/TestAuthoring';
 import { ToastProvider } from './components/Toaster';
 import { useToasts } from './components/Toaster';
 import { listAllTestCases, triggerTestRun, getTestRun, getTestRunLogs, cancelTestRun } from './api/testRuns';
@@ -289,45 +290,7 @@ function DashboardPage() {
   );
 }
 
-// PUBLIC_INTERFACE
-function TestAuthoringPage() {
-  /** Author and manage AI-assisted test cases. */
-  return (
-    <>
-      <Section title="New Test" description="Describe the scenario and let AI draft steps.">
-        <div className="cn-form">
-          <label className="cn-field">
-            <span>Test Name</span>
-            <input type="text" placeholder="e.g., Add item to cart and checkout" />
-          </label>
-          <label className="cn-field">
-            <span>Scenario Description</span>
-            <textarea rows="4" placeholder="Describe the user flow and acceptance criteria..." />
-          </label>
-          <div className="cn-actions">
-            <button className="cn-btn primary">Generate with AI</button>
-            <button className="cn-btn">Save Draft</button>
-          </div>
-        </div>
-      </Section>
-      <Section title="Your Tests" description="Quick access to existing tests.">
-        <div className="cn-table">
-          <div className="cn-table-row cn-table-head">
-            <div>Name</div><div>Last Updated</div><div>Status</div><div>Actions</div>
-          </div>
-          <div className="cn-table-row">
-            <div>Login flow</div><div>Today</div><div><span className="cn-badge ok">Ready</span></div>
-            <div><button className="cn-btn small">Edit</button></div>
-          </div>
-          <div className="cn-table-row">
-            <div>Checkout flow</div><div>Yesterday</div><div><span className="cn-badge warn">Needs Review</span></div>
-            <div><button className="cn-btn small">Edit</button></div>
-          </div>
-        </div>
-      </Section>
-    </>
-  );
-}
+
 
 // PUBLIC_INTERFACE
 function TestRunsPage() {
