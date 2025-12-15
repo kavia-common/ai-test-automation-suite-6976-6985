@@ -1,4 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { getHealth } from './api/client';
+import { getAppEnv } from './utils/env';
 import './App.css';
 
 /**
@@ -147,9 +149,113 @@ function Section({ title, description, children }) {
 
 // PUBLIC_INTERFACE
 function DashboardPage() {
-  /** Landing dashboard with quick stats and shortcuts. */
+  /** Landing dashboard with quick stats, health status, and shortcuts. */
+  const env = getAppEnv();
+  const [health, setHealth] = useState({ loading: true, error: null, data: null });
+
+  useEffect(() => {
+    let aborted = false;
+    const controller = new AbortController();
+
+    async function fetchHealth() {
+      setHealth({ loading: true, error: null, data: null });
+      try {
+        const res = await getHealth({ signal: controller.signal });
+        if (!aborted) setHealth({ loading: false, error: null, data: res });
+      } catch (e) {
+        if (aborted) return;
+        // Normalize error structure
+        setHealth({
+          loading: false,
+          error: {
+            message: e?.message || 'Health check failed',
+            status: e?.status,
+            detail: e?.detail
+          },
+          data: null
+        });
+      }
+    }
+    fetchHealth();
+
+    return () => {
+      aborted = true;
+      try { controller.abort(); } catch { /* ignore */ }
+    };
+  }, []);
+
+  const renderHealthCard = () => {
+    if (health.loading) {
+      return (
+        <div className="cn-card">
+          <h3>API Health</h3>
+          <p className="cn-muted">Checking health at</p>
+          <p className="cn-kpi">...</p>
+          <small className="cn-muted">
+            {env.apiBase || '(same-origin)'}
+            {env.healthcheckPath ? ` ${env.healthcheckPath}` : ' /'}
+          </small>
+        </div>
+      );
+    }
+    if (health.error) {
+      return (
+        <div className="cn-card">
+          <h3>API Health</h3>
+          <p className="cn-kpi error">Unavailable</p>
+          <p className="cn-muted">
+            {env.apiBase || '(same-origin)'}
+            {env.healthcheckPath ? ` ${env.healthcheckPath}` : ' /'}
+          </p>
+          <div className="cn-muted" style={{ marginTop: 8 }}>
+            <div>Reason: {health.error.message}</div>
+            {health.error.status != null && <div>Status: {health.error.status}</div>}
+          </div>
+          <div className="cn-actions" style={{ marginTop: 10 }}>
+            <button
+              className="cn-btn small"
+              onClick={() => {
+                setHealth(s => ({ ...s, loading: true }));
+                const controller = new AbortController();
+                getHealth({ signal: controller.signal })
+                  .then(res => setHealth({ loading: false, error: null, data: res }))
+                  .catch(e => setHealth({
+                    loading: false,
+                    error: { message: e?.message || 'Health check failed', status: e?.status, detail: e?.detail },
+                    data: null
+                  }));
+              }}
+            >
+              Retry
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    const payload = health.data;
+    const statusText =
+      (payload && (payload.status || payload.state || payload.health || payload.ok)) ?? 'OK';
+    const isOk =
+      String(statusText).toLowerCase() === 'ok' ||
+      String(statusText).toLowerCase() === 'healthy' ||
+      statusText === true;
+
+    return (
+      <div className="cn-card">
+        <h3>API Health</h3>
+        <p className={`cn-kpi ${isOk ? 'ok' : 'warn'}`}>{String(statusText)}</p>
+        <p className="cn-muted">
+          {env.apiBase || '(same-origin)'}
+          {env.healthcheckPath ? ` ${env.healthcheckPath}` : ' /'}
+        </p>
+      </div>
+    );
+  };
+
   return (
     <div className="cn-grid">
+      {renderHealthCard()}
       <div className="cn-card">
         <h3>Active Test Runs</h3>
         <p className="cn-kpi">3</p>
