@@ -2,6 +2,8 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { getHealth } from './api/client';
 import { getAppEnv } from './utils/env';
 import './App.css';
+import TestCasesPage from './pages/TestCases';
+import { ToastProvider } from './components/Toaster';
 
 /**
  * Simple hash-based router without external dependencies.
@@ -80,6 +82,7 @@ function Sidebar({ currentRoute, onNavigate }) {
   /** Sidebar navigation for the application. */
   const items = useMemo(() => ([
     { key: 'dashboard', label: 'Dashboard', icon: '🏠' },
+    { key: 'test-cases', label: 'Test Cases', icon: '🧪' },
     { key: 'test-authoring', label: 'Test Authoring', icon: '✍️' },
     { key: 'test-runs', label: 'Test Runs', icon: '🏃' },
     { key: 'results', label: 'Results', icon: '📊' },
@@ -326,10 +329,38 @@ function TestAuthoringPage() {
 // PUBLIC_INTERFACE
 function TestRunsPage() {
   /** Launch and monitor test runs. */
+  const [selectedIds, setSelectedIds] = useState(() => {
+    try {
+      const raw = window.localStorage.getItem('cn.selected.tests.v1');
+      const arr = JSON.parse(raw || '[]');
+      return Array.isArray(arr) ? arr : [];
+    } catch { return []; }
+  });
+
+  useEffect(() => {
+    // Listen to storage changes from TestCases page in other tabs
+    const onStorage = (e) => {
+      if (e.key === 'cn.selected.tests.v1') {
+        try {
+          const arr = JSON.parse(e.newValue || '[]');
+          setSelectedIds(Array.isArray(arr) ? arr : []);
+        } catch { /* ignore */ }
+      }
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, []);
+
   return (
     <>
       <Section title="Start a Run" description="Select tests and environment to execute.">
         <div className="cn-form">
+          <div className="cn-field">
+            <span>Selected Tests</span>
+            <div className="cn-muted">
+              {selectedIds.length} selected. Manage selection in Test Cases.
+            </div>
+          </div>
           <label className="cn-field">
             <span>Suite</span>
             <select>
@@ -346,7 +377,7 @@ function TestRunsPage() {
             </select>
           </label>
           <div className="cn-actions">
-            <button className="cn-btn primary">Run</button>
+            <button className="cn-btn primary" disabled={selectedIds.length === 0}>Run</button>
             <button className="cn-btn ghost">Schedule</button>
           </div>
         </div>
@@ -426,6 +457,7 @@ function ResultsPage() {
 function resolveRoute(route) {
   switch (route) {
     case 'dashboard': return { title: 'Dashboard', component: <DashboardPage /> };
+    case 'test-cases': return { title: 'Test Cases', component: <TestCasesPage /> };
     case 'test-authoring': return { title: 'Test Authoring', component: <TestAuthoringPage /> };
     case 'test-runs': return { title: 'Test Runs', component: <TestRunsPage /> };
     case 'results': return { title: 'Results', component: <ResultsPage /> };
@@ -445,13 +477,15 @@ function App() {
   const toggleTheme = () => setTheme(prev => (prev === 'light' ? 'dark' : 'light'));
 
   return (
-    <div className="cn-app">
-      <Sidebar currentRoute={route} onNavigate={navigate} />
-      <main className="cn-main">
-        <TopBar title={title} theme={theme} onToggleTheme={toggleTheme} />
-        <div className="cn-content">{component}</div>
-      </main>
-    </div>
+    <ToastProvider>
+      <div className="cn-app">
+        <Sidebar currentRoute={route} onNavigate={navigate} />
+        <main className="cn-main">
+          <TopBar title={title} theme={theme} onToggleTheme={toggleTheme} />
+          <div className="cn-content">{component}</div>
+        </main>
+      </div>
+    </ToastProvider>
   );
 }
 
