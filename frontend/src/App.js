@@ -200,7 +200,7 @@ function DashboardPage() {
           <p className="cn-kpi">...</p>
           <small className="cn-muted">
             {env.apiBase || '(same-origin)'}
-            {env.healthcheckPath ? ` ${env.healthcheckPath}` : ' /'}
+            {` ${env.healthcheckPath || '/'}`}
           </small>
         </div>
       );
@@ -212,7 +212,7 @@ function DashboardPage() {
           <p className="cn-kpi error">Unavailable</p>
           <p className="cn-muted">
             {env.apiBase || '(same-origin)'}
-            {env.healthcheckPath ? ` ${env.healthcheckPath}` : ' /'}
+            {` ${env.healthcheckPath || '/'}`}
           </p>
           <div className="cn-muted" style={{ marginTop: 8 }}>
             <div>Reason: {health.error.message}</div>
@@ -254,7 +254,7 @@ function DashboardPage() {
         <p className={`cn-kpi ${isOk ? 'ok' : 'warn'}`}>{String(statusText)}</p>
         <p className="cn-muted">
           {env.apiBase || '(same-origin)'}
-          {env.healthcheckPath ? ` ${env.healthcheckPath}` : ' /'}
+          {` ${env.healthcheckPath || '/'}`}
         </p>
       </div>
     );

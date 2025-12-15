@@ -1,14 +1,16 @@
 //
-// WebSocket client utilities
-// Provides a small pub/sub layer for run events with graceful no-op when disabled.
-//
-// Exposes:
-// - connectRunEvents(): returns an object with subscribe(event, cb), unsubscribe(event, cb), close()
-//   Events: 'open', 'close', 'error', 'message', and any backend-specific event types relayed via JSON payloads.
-//   If WS is disabled via env, returns a no-op client that never connects.
-//
-// All public functions are annotated with PUBLIC_INTERFACE.
-//
+ // WebSocket client utilities
+ // Provides a small pub/sub layer for run events with graceful no-op when disabled.
+ //
+ // Exposes:
+ // - connectRunEvents(): returns an object with subscribe(event, cb), unsubscribe(event, cb), close()
+ //   Events: 'open', 'close', 'error', 'message', and any backend-specific event types relayed via JSON payloads.
+ //   If WS is disabled via env, returns a no-op client that never connects.
+ //
+ // All public functions are annotated with PUBLIC_INTERFACE.
+ //
+ // Note: env resolution supplies sensible defaults. If REACT_APP_WS_URL is not set,
+ // it will fallback to ws://localhost:3001/ws to align with local backend defaults.
 
 import { getAppEnv, isWsEnabled } from '../utils/env';
 
